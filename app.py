@@ -4,31 +4,21 @@ import numpy as np
 import pandas as pd
 import librosa
 import base64
-import io
 import json
+import tempfile  # <--- NEW IMPORT
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
 # ============================================================================
-# REST API CONFIGURATION
+# CONFIGURATION
 # ============================================================================
 
 API_KEY = "sk_test_123456789"
-
-def authenticate_request():
-    api_key = request.headers.get('x-api-key')
-    if not api_key or api_key != API_KEY:
-        return (jsonify({"status": "error", "message": "Invalid API key"}), 401)
-    return None
-
-# ============================================================================
-# MODEL LOADING
-# ============================================================================
-
 MODEL_PATH = "deepfake_model_lr.pkl"
 model = None
 
+# Load Model
 try:
     if os.path.exists(MODEL_PATH):
         with open(MODEL_PATH, "rb") as f:
@@ -39,15 +29,14 @@ try:
 except Exception as e:
     print(f"ERROR loading model: {e}")
 
-def extract_features_for_api(audio_bytes, target_sr=16000):
+# ============================================================================
+# FEATURE EXTRACTION (The Fix: Uses File Path, not BytesIO)
+# ============================================================================
+
+def extract_features_for_api(file_path, target_sr=16000):
     try:
-        # OPTIMIZATION 1: Load directly with target_sr and 'linear' resampling (Lowest RAM usage)
-        y, sr = librosa.load(
-            io.BytesIO(audio_bytes), 
-            sr=target_sr, 
-            mono=True, 
-            res_type='linear'  # <--- CRITICAL CHANGE: Uses simple math instead of heavy DSP
-        )
+        # Load directly from the TEMP FILE PATH (Reliable)
+        y, sr = librosa.load(file_path, sr=target_sr, mono=True)
         
         if len(y) == 0: 
             return None, "Audio file is empty."
@@ -58,7 +47,7 @@ def extract_features_for_api(audio_bytes, target_sr=16000):
         
         features = {}
         
-        # MFCC (Standard)
+        # MFCC
         mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
         mfcc_means = np.mean(mfcc, axis=1)
         for i, m in enumerate(mfcc_means):
@@ -85,19 +74,20 @@ def extract_features_for_api(audio_bytes, target_sr=16000):
 
 @app.route('/', methods=['GET'])
 def index():
-    # Simple Health Check (Fixes the TemplateNotFound error)
     return jsonify({
-        "status": "online",
-        "message": "Deepfake Detection API is running.",
+        "status": "online", 
+        "message": "Deepfake Detection API is running (TempFile Mode).",
         "model_loaded": model is not None
     })
 
 @app.route('/api/voice-detection', methods=['POST'])
 def voice_detection_api():
     # 1. Authenticate
-    auth_error = authenticate_request()
-    if auth_error: return auth_error
+    api_key = request.headers.get('x-api-key')
+    if api_key != API_KEY:
+        return jsonify({"status": "error", "message": "Invalid API key"}), 401
     
+    temp_filename = None
     try:
         # 2. Parse Request
         data = request.get_json()
@@ -109,20 +99,33 @@ def voice_detection_api():
         if not language or not audio_base64:
              return jsonify({"status": "error", "message": "Missing fields"}), 400
 
-        # 3. Decode & Process
+        # 3. Decode & Save to Temp File (THE FIX)
         audio_bytes = base64.b64decode(audio_base64)
-        if model is None: return jsonify({"status": "error", "message": "Model not loaded"}), 500
+        
+        # Create a temp file on disk
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
+            temp_file.write(audio_bytes)
+            temp_filename = temp_file.name # Save the path
+            
+        if model is None: 
+            return jsonify({"status": "error", "message": "Model not loaded"}), 500
 
-        features_df, error_msg = extract_features_for_api(audio_bytes)
-        if features_df is None: return jsonify({"status": "error", "message": error_msg}), 400
+        # 4. Extract Features (Pass the FILENAME, not bytes)
+        features_df, error_msg = extract_features_for_api(temp_filename)
+        
+        # 5. Cleanup: Delete the temp file immediately
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
 
-        # 4. Predict
+        if features_df is None: 
+            return jsonify({"status": "error", "message": error_msg}), 400
+
+        # 6. Predict
         prediction_proba = model.predict_proba(features_df)[0]
         confidence_score = float(prediction_proba[1]) # Prob of Fake
         
         classification = "AI_GENERATED" if confidence_score > 0.5 else "HUMAN"
         
-        # 5. Explanation
         if classification == "AI_GENERATED":
             expl = "High spectral flatness and abnormal frequency consistency detected."
         else:
@@ -137,6 +140,9 @@ def voice_detection_api():
         })
 
     except Exception as e:
+        # Cleanup on error too
+        if temp_filename and os.path.exists(temp_filename):
+            os.remove(temp_filename)
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
