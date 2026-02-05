@@ -5,7 +5,7 @@ import pandas as pd
 import librosa
 import base64
 import json
-import tempfile  # <--- NEW IMPORT
+import tempfile
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -30,38 +30,40 @@ except Exception as e:
     print(f"ERROR loading model: {e}")
 
 # ============================================================================
-# FEATURE EXTRACTION (The Fix: Uses File Path, not BytesIO)
+# FEATURE EXTRACTION (Fixed to match your original Model)
 # ============================================================================
 
 def extract_features_for_api(file_path, target_sr=16000):
     try:
-        # Load directly from the TEMP FILE PATH (Reliable)
+        # Load audio from the temp file
         y, sr = librosa.load(file_path, sr=target_sr, mono=True)
         
         if len(y) == 0: 
             return None, "Audio file is empty."
         
-        # Noise injection
+        # Noise injection (Prevents errors on silence)
         noise_amp = 0.001 * np.random.uniform() * np.amax(y)
         y = y + noise_amp * np.random.normal(size=y.shape[0])
         
         features = {}
         
-        # MFCC
-        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+        # 1. Spectral Rolloff
+        features["rolloff"] = np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr, roll_percent=0.85))
+        
+        # 2. Spectral Centroid (This was missing!)
+        features["centroid"] = np.mean(librosa.feature.spectral_centroid(y=y, sr=sr))
+        
+        # 3. Zero Crossing Rate
+        features["zcr"] = np.mean(librosa.feature.zero_crossing_rate(y))
+        
+        # 4. MFCCs (Must be 20, not 13, to match your model)
+        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20)
         mfcc_means = np.mean(mfcc, axis=1)
+        
         for i, m in enumerate(mfcc_means):
             features[f"mfcc_{i}"] = m
-        
-        # Delta MFCC
-        delta_mfcc = librosa.feature.delta(mfcc)
-        delta_mfcc_means = np.mean(delta_mfcc, axis=1)
-        for i, d in enumerate(delta_mfcc_means):
-            features[f"delta_mfcc_{i}"] = d
-        
-        # Other features
-        features["zcr"] = np.mean(librosa.feature.zero_crossing_rate(y))
-        features["rolloff"] = np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr, roll_percent=0.85))
+            
+        # Note: We REMOVED 'delta_mfcc' because your model was not trained on it.
         
         return pd.DataFrame([features]), None
     
@@ -76,7 +78,7 @@ def extract_features_for_api(file_path, target_sr=16000):
 def index():
     return jsonify({
         "status": "online", 
-        "message": "Deepfake Detection API is running (TempFile Mode).",
+        "message": "Deepfake Detection API is running (Fixed Features).",
         "model_loaded": model is not None
     })
 
@@ -99,35 +101,34 @@ def voice_detection_api():
         if not language or not audio_base64:
              return jsonify({"status": "error", "message": "Missing fields"}), 400
 
-        # 3. Decode & Save to Temp File (THE FIX)
+        # 3. Decode & Save to Temp File
         audio_bytes = base64.b64decode(audio_base64)
         
-        # Create a temp file on disk
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
             temp_file.write(audio_bytes)
-            temp_filename = temp_file.name # Save the path
+            temp_filename = temp_file.name
             
         if model is None: 
             return jsonify({"status": "error", "message": "Model not loaded"}), 500
 
-        # 4. Extract Features (Pass the FILENAME, not bytes)
+        # 4. Extract Features
         features_df, error_msg = extract_features_for_api(temp_filename)
         
-        # 5. Cleanup: Delete the temp file immediately
+        # Cleanup temp file
         if os.path.exists(temp_filename):
             os.remove(temp_filename)
 
         if features_df is None: 
             return jsonify({"status": "error", "message": error_msg}), 400
 
-        # 6. Predict
+        # 5. Predict
         prediction_proba = model.predict_proba(features_df)[0]
         confidence_score = float(prediction_proba[1]) # Prob of Fake
         
         classification = "AI_GENERATED" if confidence_score > 0.5 else "HUMAN"
         
         if classification == "AI_GENERATED":
-            expl = "High spectral flatness and abnormal frequency consistency detected."
+            expl = "High spectral centroid and abnormal frequency consistency detected."
         else:
             expl = "Natural vocal variances and background noise patterns detected."
 
@@ -140,7 +141,6 @@ def voice_detection_api():
         })
 
     except Exception as e:
-        # Cleanup on error too
         if temp_filename and os.path.exists(temp_filename):
             os.remove(temp_filename)
         return jsonify({"status": "error", "message": str(e)}), 500
