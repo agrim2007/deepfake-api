@@ -39,31 +39,47 @@ try:
 except Exception as e:
     print(f"ERROR loading model: {e}")
 
-# ============================================================================
-# FEATURE EXTRACTION
-# ============================================================================
-
-def extract_features_for_api(audio_bytes, target_sr=16000):
+def extract_features_for_api(audio_bytes, sr=16000):
     try:
-        # CHANGE 1: Load with sr=None (Native Rate) to avoid instant resampling crash
+        # Load audio from bytes
+        # Using sr=None first to prevent resampling crashes, then resample if needed
         y, orig_sr = librosa.load(io.BytesIO(audio_bytes), sr=None, mono=True)
         
-        if len(y) == 0: return None, "Audio file is empty."
-
-        # CHANGE 2: Manually resample ONLY if necessary (lighter on memory)
-        if orig_sr != target_sr:
-            y = librosa.resample(y, orig_sr=orig_sr, target_sr=target_sr)
-            sr = target_sr
+        if len(y) == 0: 
+            return None, "Audio file is empty."
+        
+        # Resample only if necessary (saves memory)
+        if sr is not None and orig_sr != sr:
+            y = librosa.resample(y, orig_sr=orig_sr, target_sr=sr)
         else:
             sr = orig_sr
-            
-        # ... (Rest of the function stays the same) ...
-        # Noise injection
+        
+        # Noise injection for stability
         noise_amp = 0.001 * np.random.uniform() * np.amax(y)
         y = y + noise_amp * np.random.normal(size=y.shape[0])
         
         features = {}
+        
+        # MFCC
         mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+        mfcc_means = np.mean(mfcc, axis=1)
+        for i, m in enumerate(mfcc_means):
+            features[f"mfcc_{i}"] = m
+        
+        # Delta MFCC
+        delta_mfcc = librosa.feature.delta(mfcc)
+        delta_mfcc_means = np.mean(delta_mfcc, axis=1)
+        for i, d in enumerate(delta_mfcc_means):
+            features[f"delta_mfcc_{i}"] = d
+        
+        # Other features
+        features["zcr"] = np.mean(librosa.feature.zero_crossing_rate(y))
+        features["rolloff"] = np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr, roll_percent=0.85))
+        
+        return pd.DataFrame([features]), None
+    
+    except Exception as e:
+        return None, f"Extraction failed: {str(e)}"
 
 # ============================================================================
 # ROUTES
