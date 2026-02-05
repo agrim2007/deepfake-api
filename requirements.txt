@@ -1,6 +1,9 @@
 flask
 gunicorn
-numpy
+numpy==1.26.4
 pandas
 scikit-learn
-librosa
+librosa==0.10.2
+numba==0.59.1
+llvmlite==0.42.0
+soundfile
